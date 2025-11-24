@@ -2,6 +2,9 @@ import os
 import pandas as pd
 from datetime import datetime
 import re
+import warnings
+
+warnings.filterwarnings('ignore')
 
 
 def find_excel_files(folder_path):
@@ -19,9 +22,49 @@ def find_excel_files(folder_path):
     return excel_files
 
 
+def extract_date_from_filename(filename):
+    """
+    Извлекает дату из названия файла
+    """
+    # Паттерны для поиска дат в названиях файлов
+    date_patterns = [
+        r'(\d{1,2}\s+\w+\s+\d{4})',  # "30 января 2025"
+        r'(\d{1,2}\.\d{1,2}\.\d{4})',  # "30.01.2025"
+        r'(\d{1,2}-\d{1,2}-\d{4})',  # "30-01-2025"
+        r'(\d{4}-\d{1,2}-\d{1,2})',  # "2025-01-30"
+    ]
+
+    for pattern in date_patterns:
+        match = re.search(pattern, filename)
+        if match:
+            date_str = match.group(1)
+            try:
+                # Пробуем разные форматы дат
+                if re.match(r'\d{1,2}\s+\w+\s+\d{4}', date_str):
+                    # Русская дата "30 января 2025"
+                    months_ru = {
+                        'января': 1, 'февраля': 2, 'марта': 3, 'апреля': 4,
+                        'мая': 5, 'июня': 6, 'июля': 7, 'августа': 8,
+                        'сентября': 9, 'октября': 10, 'ноября': 11, 'декабря': 12
+                    }
+                    day, month_ru, year = date_str.split()
+                    month = months_ru.get(month_ru.lower())
+                    if month:
+                        return datetime(int(year), month, int(day))
+                else:
+                    # Стандартные форматы дат
+                    date_obj = pd.to_datetime(date_str, dayfirst=True, errors='coerce')
+                    if not pd.isna(date_obj):
+                        return date_obj
+            except:
+                continue
+    return None
+
+
 def find_date_and_income(folder_path):
     """
-    Ищет в Excel файлах первую дату и суммы после ячейки со словом 'приход'
+    Ищет в Excel файлах первую дату и суммы в правой ячейке от ячейки со словом 'приход'
+    Оставляет максимальную сумму для каждой даты
     """
     print(f"Поиск в папке: {folder_path}")
     print("=" * 80)
@@ -33,7 +76,7 @@ def find_date_and_income(folder_path):
         print("Файлы Excel не найдены в указанной папке и подпапках!")
         return
 
-    # Собираем все результаты для табличного вывода
+    # Собираем все результаты для последующей обработки
     all_results = []
 
     for file_path in excel_files:
@@ -47,31 +90,43 @@ def find_date_and_income(folder_path):
             file_date = None
             income_amounts = []
 
-            for sheet_name in excel_file.sheet_names:
-                # Читаем лист как есть (без преобразования типов для поиска дат)
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+            # Сначала пробуем извлечь дату из названия файла
+            file_date = extract_date_from_filename(filename)
+            date_source = "из названия файла"
 
-                # Ищем первую дату в файле
-                if file_date is None:
+            # Если не нашли в названии, ищем в содержимом файла
+            if file_date is None:
+                for sheet_name in excel_file.sheet_names:
+                    # Читаем лист как есть (без преобразования типов для поиска дат)
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+
+                    # Ищем первую дату в файле
                     for col in df.columns:
                         for cell in df[col].dropna():
                             # Пробуем преобразовать в дату
                             if isinstance(cell, (datetime, pd.Timestamp)):
                                 file_date = cell
+                                date_source = "из содержимого файла"
                                 break
                             elif isinstance(cell, str):
                                 # Пробуем распарсить строку как дату
                                 try:
-                                    date_obj = pd.to_datetime(cell, errors='coerce')
+                                    date_obj = pd.to_datetime(cell, dayfirst=True, errors='coerce')
                                     if not pd.isna(date_obj):
                                         file_date = date_obj
+                                        date_source = "из содержимого файла"
                                         break
                                 except:
                                     pass
                         if file_date is not None:
                             break
+                    if file_date is not None:
+                        break
 
-                # Ищем слово 'приход' и числа после него
+            # Ищем слово 'приход' и числа в правой ячейке
+            for sheet_name in excel_file.sheet_names:
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+
                 for row_idx in range(len(df)):
                     for col_idx in range(len(df.columns)):
                         cell_value = df.iat[row_idx, col_idx]
@@ -81,56 +136,51 @@ def find_date_and_income(folder_path):
                                 isinstance(cell_value, str) and
                                 'приход' in str(cell_value).lower()):
 
-                            # Ищем числа в соседних ячейках справа и снизу
-                            # Справа от ячейки
+                            # Ищем число ТОЛЬКО в соседней правой ячейке
                             if col_idx + 1 < len(df.columns):
                                 right_cell = df.iat[row_idx, col_idx + 1]
-                                amount = extract_number(right_cell)
-                                if amount is not None:
-                                    income_amounts.append(amount)
 
-                            # Снизу от ячейки
-                            if row_idx + 1 < len(df):
-                                below_cell = df.iat[row_idx + 1, col_idx]
-                                amount = extract_number(below_cell)
-                                if amount is not None:
-                                    income_amounts.append(amount)
+                                # Проверяем, что ячейка не пустая
+                                if right_cell is not None and not pd.isna(right_cell):
+                                    amount = extract_number(right_cell)
+                                    if amount is not None:
+                                        income_amounts.append(amount)
 
-                            # Диагональ справа-снизу
-                            if (row_idx + 1 < len(df) and
-                                    col_idx + 1 < len(df.columns)):
-                                diag_cell = df.iat[row_idx + 1, col_idx + 1]
-                                amount = extract_number(diag_cell)
-                                if amount is not None:
-                                    income_amounts.append(amount)
-
-            # Форматируем дату
+            # Форматируем дату для группировки
             if file_date:
                 if isinstance(file_date, (datetime, pd.Timestamp)):
+                    date_key = file_date.strftime('%Y-%m-%d')  # Ключ для группировки
                     formatted_date = file_date.strftime('%Y-%m-%d')
+                    date_display = f"{formatted_date} ({date_source})"
                 else:
+                    date_key = str(file_date)
                     formatted_date = str(file_date)
+                    date_display = f"{formatted_date} ({date_source})"
             else:
-                formatted_date = "Не найдена"
+                date_key = "Не найдена"
+                date_display = "Не найдена"
 
-            # Убираем дубликаты сумм
-            income_amounts = list(set(income_amounts))
+            # Находим максимальную сумму прихода для этого файла
+            max_amount = max(income_amounts) if income_amounts else None
 
-            # Добавляем результаты
-            if income_amounts:
-                for amount in income_amounts:
-                    all_results.append({
-                        'Файл': filename,
-                        'Папка': folder_name,
-                        'Дата': formatted_date,
-                        'Сумма прихода': f"{amount:,.2f}".replace(',', ' ').replace('.', ',')
-                    })
+            # Добавляем результат
+            if max_amount is not None:
+                all_results.append({
+                    'Файл': filename,
+                    'Папка': folder_name,
+                    'Дата': date_display,
+                    'Дата_ключ': date_key,
+                    'Сумма прихода': max_amount,
+                    'Сумма прихода (формат)': f"{max_amount:,.2f}".replace(',', ' ').replace('.', ',')
+                })
             else:
                 all_results.append({
                     'Файл': filename,
                     'Папка': folder_name,
-                    'Дата': formatted_date,
-                    'Сумма прихода': "Не найдена"
+                    'Дата': date_display,
+                    'Дата_ключ': date_key,
+                    'Сумма прихода': None,
+                    'Сумма прихода (формат)': "Не найдена"
                 })
 
         except Exception as e:
@@ -138,13 +188,43 @@ def find_date_and_income(folder_path):
                 'Файл': filename,
                 'Папка': folder_name,
                 'Дата': "Ошибка",
-                'Сумма прихода': f"Ошибка: {str(e)}"
+                'Дата_ключ': "Ошибка",
+                'Сумма прихода': None,
+                'Сумма прихода (формат)': f"Ошибка: {str(e)}"
             })
 
+    # Группируем по дате и оставляем максимальную сумму для каждой даты
+    grouped_results = {}
+    for result in all_results:
+        date_key = result['Дата_ключ']
+        amount = result['Сумма прихода']
+
+        if date_key not in grouped_results:
+            grouped_results[date_key] = result
+        else:
+            # Если для этой даты уже есть запись, сравниваем суммы
+            current_amount = grouped_results[date_key]['Сумма прихода']
+            if amount is not None and (current_amount is None or amount > current_amount):
+                grouped_results[date_key] = result
+
+    # Преобразуем обратно в список для вывода
+    final_results = list(grouped_results.values())
+
     # Выводим таблицу
-    if all_results:
+    if final_results:
         # Создаем DataFrame для красивого вывода
-        df_results = pd.DataFrame(all_results)
+        df_results = pd.DataFrame([{
+            'Файл': r['Файл'],
+            'Папка': r['Папка'],
+            'Дата': r['Дата'],
+            'Сумма прихода': r['Сумма прихода (формат)']
+        } for r in final_results])
+
+        # Сортируем по дате
+        try:
+            df_results = df_results.sort_values('Дата')
+        except:
+            pass  # Если сортировка по дате не удалась, оставляем как есть
 
         # Настраиваем отображение pandas для красивого вывода
         pd.set_option('display.max_rows', None)
@@ -152,19 +232,24 @@ def find_date_and_income(folder_path):
         pd.set_option('display.max_colwidth', 50)
 
         print(f"\nНайдено файлов: {len(excel_files)}")
-        print("\nРЕЗУЛЬТАТЫ ПОИСКА:")
-        print("=" * 100)
+        print("\nРЕЗУЛЬТАТЫ ПОИСКА (максимальная сумма для каждой даты):")
+        print("=" * 120)
         print(df_results.to_string(index=False))
-        print("=" * 100)
+        print("=" * 120)
 
         # Статистика
-        total_files = len(set(result['Файл'] for result in all_results))
-        total_amounts = len([result for result in all_results if
-                             result['Сумма прихода'] != "Не найдена" and "Ошибка" not in result['Сумма прихода']])
+        total_files = len(excel_files)
+        files_with_dates = len(
+            [r for r in final_results if "Не найдена" not in r['Дата'] and "Ошибка" not in r['Дата']])
+        files_with_amounts = len([r for r in final_results if
+                                  r['Сумма прихода'] is not None and "Ошибка" not in r['Сумма прихода (формат)']])
+        unique_dates = len([r for r in final_results if "Не найдена" not in r['Дата'] and "Ошибка" not in r['Дата']])
 
         print(f"\nСТАТИСТИКА:")
         print(f"Обработано файлов: {total_files}")
-        print(f"Найдено сумм прихода: {total_amounts}")
+        print(f"Уникальных дат: {unique_dates}")
+        print(f"Файлов с найденными датами: {files_with_dates}")
+        print(f"Файлов с найденными суммами: {files_with_amounts}")
 
 
 def extract_number(value):
