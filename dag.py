@@ -158,7 +158,10 @@ def main():
     date_str = extract_date_from_filename(src_path)
 
     os.makedirs(DEST_DIR, exist_ok=True)
-    dest_path = make_unique_dest_path(DEST_DIR, f"Отчет по ДЗ {date_str}.xlsx")
+
+    # Вставляем дату в название файла
+    current_date = datetime.now().strftime("%d.%m.%Y")
+    dest_path = make_unique_dest_path(DEST_DIR, f"Отчет по ДЗ {current_date}.xlsx")
 
     log(f"Выбран исходный файл: {src_path}")
     log(f"Создаю копию: {dest_path}")
@@ -245,6 +248,11 @@ def main():
         log("Вставляю данные в цель одним диапазоном...")
         ws_t.Range(ws_t.Cells(data_start_t, 1), ws_t.Cells(data_start_t + rows_count - 1, tgt_last_col)).Value = tuple(tuple(r) for r in out)
         log("Вставка завершена.")
+
+        # ОБНОВЛЕНИЕ ВСЕХ СВОДНЫХ ТАБЛИЦ И МОДЕЛЕЙ ДАННЫХ
+        log("Обновляю все сводные таблицы и модели данных...")
+        wb_target.RefreshAll()  # Обновление всех сводных таблиц и моделей данных
+        log("Сводные таблицы и модели данных обновлены.")
 
         # Закрываем источник
         wb_data.Close(SaveChanges=False)
